@@ -93,4 +93,5 @@ A 3-bladed, D = 0.3 m propeller was evaluated at **J = 0.4** (9,200 RPM, V∞ = 
 
 ## License
 
-Add your license of choice here.
+This project is licensed under the MIT License.
+See the [LICENSE](LICENSE) file for details.
