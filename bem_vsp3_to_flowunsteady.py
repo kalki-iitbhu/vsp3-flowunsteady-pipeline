@@ -169,6 +169,58 @@ def add_hub_at_zero(rows, r_col=0):
     return [zero_row] + rows_sorted
 
 
+def apply_feather_axis_correction(rows, r_col, chord_col, twist_col, rake_col, skew_col,
+                                   feather_axis_fraction, feather_offset_fraction=0.0):
+    """
+    OpenVSP's Rake/Skew describe the offset of the FEATHER AXIS point from a
+    straight radial line, in a frame aligned with the local (twisted) chord
+    -- NOT the offset of the leading edge, which is what FLOWUnsteady's
+    sweepdist/heightdist require (generate_rotor places sweepdist/heightdist
+    = 0 exactly at the leading edge).
+
+    This subtracts the leading-edge-to-feather-axis vector (rotated into the
+    global sweep/height frame by the local twist angle) from the raw
+    Rake/Skew values, so the corrected columns become leading-edge-
+    referenced, matching FLOWUnsteady's convention.
+
+    feather_axis_fraction: OpenVSP's FeatherAxisXoC (0 = LE, 1 = TE)
+    feather_offset_fraction: OpenVSP's FeatherOffsetXoC, an additional
+        chordwise shift on top of feather_axis_fraction (both are fractions
+        of local chord, per OpenVSP's "XoC" naming convention)
+    """
+    axis_fraction = feather_axis_fraction + feather_offset_fraction
+    if abs(axis_fraction) < 1e-9:
+        # Feather axis already at the leading edge -- nothing to correct.
+        return rows
+
+    corrected = []
+    for row in rows:
+        chord = row[chord_col]
+        twist = np.radians(row[twist_col])
+        raw_skew = row[skew_col]   # feather-axis offset, parallel to local chord
+        raw_rake = row[rake_col]   # feather-axis offset, normal to local chord
+
+        le_to_feather = axis_fraction * chord
+
+        # Rotate the local chord-aligned (skew, rake) offset into the global
+        # (sweep, height) frame, then subtract the nominal LE->feather-axis
+        # placement (also rotated by twist) to re-reference to the LE.
+        # NOTE: the sign here was empirically verified against FLOWUnsteady's
+        # actual VLM output for a real (prop2) rotor - generate_rotor applies
+        # the internal twist rotation with the OPPOSITE sign convention from
+        # the raw .bem Twist column, so the offset must be ADDED here, not
+        # subtracted, or the leading edge lands on the wrong side of the
+        # feather axis (mid_offset ends up ~2x too large instead of ~0).
+        sweep = (raw_skew + le_to_feather) * np.cos(twist) - raw_rake * np.sin(twist)
+        height = (raw_skew + le_to_feather) * np.sin(twist) + raw_rake * np.cos(twist)
+
+        new_row = list(row)
+        new_row[skew_col] = sweep    # now: leading-edge-referenced sweepdist
+        new_row[rake_col] = height   # now: leading-edge-referenced heightdist
+        corrected.append(new_row)
+    return corrected
+
+
 def write_csv(path, header, rows):
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
@@ -178,7 +230,14 @@ def write_csv(path, header, rows):
 
 
 def _fmt(v):
-    return f"{v:.10g}"
+    s = f"{v:.10g}"
+    # Guarantee this parses as a Julia Float64 literal, not Int64 - %.10g
+    # strips the decimal point from whole numbers (e.g. 1.0 -> "1"), which
+    # Julia would then read as an Int64, breaking any keyword argument
+    # (e.g. blade_r=) that generate_rotor expects as Float64.
+    if not any(c in s for c in ".eEnN"):  # no '.', no exponent, not inf/nan
+        s += ".0"
+    return s
 
 
 def format_julia_matrix(rows, per_line=4, indent="    "):
@@ -211,19 +270,27 @@ def parse_vsp3(vsp3_path):
     R_tip = diameter / 2.0
     B = int(num_blade) if num_blade else None
 
-    chord_block_m = re.search(r'<ParmContainer[^>]*Name="Chord"[^>]*>(.*?)</ParmContainer>', text, re.S)
-    chorddist = []
-    if chord_block_m:
-        cblock = chord_block_m.group(1)
-        r_vals = {int(i): float(v) for i, v in re.findall(r'<r_(\d+) Value="([^"]+)"', cblock)}
-        c_vals = {int(i): float(v) for i, v in re.findall(r'<crd_(\d+) Value="([^"]+)"', cblock)}
-        for idx in sorted(r_vals):
-            if idx in c_vals:
-                chorddist.append((r_vals[idx], c_vals[idx]))
-    if not chorddist:
-        print("  [WARNING] Could not parse Chord curve control points -- "
-              "falling back to a flat chord/R=0.15 assumption for Re estimates only.")
-        chorddist = [(0.0, 0.15), (1.0, 0.15)]
+    # --- Feather-axis parameters -------------------------------------------
+    # OpenVSP's Rake/Skew (in the .bem export) describe the offset of the
+    # FEATHER AXIS point, not the leading edge. FeatherAxisXoC is the
+    # chordwise fraction (0 = leading edge, 1 = trailing edge) where that
+    # feather axis sits; FeatherOffsetXoC is an additional chordwise shift
+    # on top of it; Feather is an overall collective feather angle (deg).
+    # FLOWUnsteady's generate_rotor expects sweepdist/heightdist referenced
+    # to the LEADING EDGE, so these must be corrected (see
+    # apply_feather_axis_correction below) before being used.
+    feather_deg = top_val("Feather")
+    feather_axis_xoc = top_val("FeatherAxisXoC")
+    feather_offset_xoc = top_val("FeatherOffsetXoC")
+    if feather_axis_xoc is None:
+        print("  [WARNING] Could not find <FeatherAxisXoC> in the .vsp3 -- "
+              "assuming 0.0 (leading edge). If your propeller's feather axis "
+              "is NOT at the leading edge, sweepdist/heightdist will be wrong.")
+        feather_axis_xoc = 0.0
+    if feather_offset_xoc is None:
+        feather_offset_xoc = 0.0
+    if feather_deg is None:
+        feather_deg = 0.0
 
     xsecsurf_match = re.search(r"<XSecSurf>(.*?)</XSecSurf>", text, re.S)
     if not xsecsurf_match:
@@ -248,18 +315,51 @@ def parse_vsp3(vsp3_path):
         camber = getval("Camber")
         camber_loc = getval("CamberLoc")
         thick_chord = getval("ThickChord")
+        chord = getval("Chord")  # actual chord length (model units, e.g. m) at this station
 
         if xsec_type == XS_FOUR_SERIES and None not in (r_frac, camber, camber_loc, thick_chord):
             stations.append({"r_R": r_frac, "camber": camber,
-                              "camber_loc": camber_loc, "thickness": thick_chord})
+                              "camber_loc": camber_loc, "thickness": thick_chord,
+                              "chord": chord})
         else:
             print(f"  [skip] station r/R={r_frac}: unsupported XSec type ({xsec_type}) "
                   f"-- only Four-Series is auto-handled currently")
             skipped.append((r_frac, xsec_type))
 
     stations.sort(key=lambda s: s["r_R"])
+
+    # --- chord distribution for Re estimates (XFOIL Reynolds number per station) ---
+    # Preferred: build directly from each station's own real Chord value (exact,
+    # no curve-reconstruction needed). Falls back to the ParmContainer curve
+    # search (older/different .vsp3 layouts), then a flat assumption as a last
+    # resort - but the flat fallback means every XFOIL polar's Reynolds number
+    # is wrong, which biases profile-drag/CQ predictions even when the rest of
+    # the geometry pipeline is correct, so prefer the per-station values whenever
+    # they're available (as they are here).
+    chorddist = [(s["r_R"], s["chord"]) for s in stations if s.get("chord") is not None]
+
+    if not chorddist:
+        chord_block_m = re.search(r'<ParmContainer[^>]*Name="Chord"[^>]*>(.*?)</ParmContainer>', text, re.S)
+        if chord_block_m:
+            cblock = chord_block_m.group(1)
+            r_vals = {int(i): float(v) for i, v in re.findall(r'<r_(\d+) Value="([^"]+)"', cblock)}
+            c_vals = {int(i): float(v) for i, v in re.findall(r'<crd_(\d+) Value="([^"]+)"', cblock)}
+            for idx in sorted(r_vals):
+                if idx in c_vals:
+                    chorddist.append((r_vals[idx], c_vals[idx]))
+
+    if not chorddist:
+        print("  [WARNING] Could not find per-station Chord values OR a Chord curve "
+              "ParmContainer -- falling back to a flat chord/R=0.15 assumption for Re "
+              "estimates only. XFOIL polars will use the WRONG Reynolds number at every "
+              "station; fix this before trusting CQ/torque/efficiency results.")
+        chorddist = [(0.0, 0.15), (1.0, 0.15)]
+
     return {"R_tip": R_tip, "B": B, "chorddist": chorddist, "stations": stations,
-            "skipped_stations": skipped}
+            "skipped_stations": skipped,
+            "feather_deg": feather_deg,
+            "feather_axis_xoc": feather_axis_xoc,
+            "feather_offset_xoc": feather_offset_xoc}
 
 
 # --------------------------- pre-flight sanity checks ------------------------
@@ -589,7 +689,19 @@ def generate_airfoil_contours(vsp3_parsed, outdir):
 # =============================================================================
 
 def build_julia_script(bem_header, extended_rows, r_col, chord_col, twist_col,
-                        rake_col, skew_col, airfoil_entries, prefix):
+                        rake_col, skew_col, airfoil_entries, prefix,
+                        n_elements=20, blade_r=1/5, spline_s=None, spline_k=None):
+    # Optional spline-fit overrides for generate_rotor. When left as None the
+    # kwargs are omitted entirely, so FLOWUnsteady's library defaults apply
+    # (which is what every earlier run used).
+    spline_param_lines = ""
+    spline_kwargs = ""
+    if spline_s is not None:
+        spline_param_lines += f"spline_s         = {_fmt(spline_s)}                       # Smoothing factor of the chord/twist/sweep/height spline fits (0 = interpolate exactly through the table)\n"
+        spline_kwargs += "                                        spline_s=spline_s,\n"
+    if spline_k is not None:
+        spline_param_lines += f"spline_k         = {int(spline_k)}                         # Spline order (1 = piecewise linear, 3 = cubic)\n"
+        spline_kwargs += "                                        spline_k=spline_k,\n"
     diameter = float(bem_header.get("Diameter", 0.0))
     R = diameter / 2.0
     num_blades = int(float(bem_header.get("Num_Blade", 2)))
@@ -649,9 +761,9 @@ pitch           = 0.0                       # (deg) collective pitch of blades
 CW              = false                     # Clock-wise rotation
 xfoil           = false                     # Real polars already generated below -- don't re-run XFOIL internally
 ncrit           = {NCRIT}                   # Turbulence criterion for XFOIL
-n               = 20                        # Number of blade elements per blade
-r               = 1/5                       # Geometric expansion of elements
-
+n               = {n_elements}                        # Number of blade elements per blade
+r               = {_fmt(blade_r)}                       # Geometric expansion of elements
+{spline_param_lines}
 # Main rotor parameters (from {prefix}.bem)
 R               = {_fmt(R)}                     # (m) Radius of blade tip
 Rhub            = {_fmt(Rhub)}                     # (m) Radius of hub
@@ -684,7 +796,7 @@ data_path = @__DIR__
 rotor = uns.generate_rotor(R, Rhub, B, chorddist, twistdist, sweepdist, heightdist, airfoil_contours;
                                         pitch=pitch,
                                         n=n, CW=CW, blade_r=r,
-                                        altReD=[RPM, J, mu/rho],
+{spline_kwargs}                                        altReD=[RPM, J, mu/rho],
                                         xfoil=xfoil,
                                         ncrit=ncrit,
                                         data_path=data_path,
@@ -817,6 +929,35 @@ def main():
     ap.add_argument("-o", "--outdir", default="flowunsteady_output", help="Output directory")
     ap.add_argument("-p", "--prefix", default=None,
                      help="Filename prefix for outputs (default: .bem filename stem)")
+    ap.add_argument("--n-elements", type=int, default=20,
+                     help="Number of blade elements FLOWUnsteady's generate_rotor "
+                          "uses (n=). Increase this if a convergence check shows "
+                          "the default under-resolves a fast-changing region "
+                          "(e.g. an aggressively tapered/twisted tip). Default: 20")
+    ap.add_argument("--blade-r", type=float, default=1/5,
+                     help="Geometric expansion ratio of element spacing along "
+                          "span (blade_r= in generate_rotor) - controls how much "
+                          "elements cluster toward one end vs. being uniform. "
+                          "Default: 0.2")
+    ap.add_argument("--trim-tip-chord-below", type=float, default=None,
+                     help="FLOOR any .bem row whose Chord/R is below this value. "
+                          "Only useful if your blade table really contains a "
+                          "(near-)zero-chord tip row; it does nothing otherwise "
+                          "(e.g. it is a no-op for prop2, whose tip is "
+                          "Chord/R = 0.13). Off by default.")
+    ap.add_argument("--spline-s", type=float, default=0.0,
+                     help="Smoothing factor for generate_rotor's spline fits of "
+                          "chorddist/twistdist/sweepdist/heightdist. Defaults to "
+                          "0.0 (exact interpolation through every table point, "
+                          "no smoothing) - empirically confirmed on a real "
+                          "propeller to eliminate an otherwise-growing tip-chord "
+                          "mismatch that got WORSE with more blade elements "
+                          "under FLOWUnsteady's own (nonzero) default smoothing. "
+                          "Pass --spline-s None-equivalent only if you have a "
+                          "specific reason to want smoothing.")
+    ap.add_argument("--spline-k", type=int, default=None,
+                     help="Spline order for those fits (1 = piecewise linear, "
+                          "3 = cubic). Default: not passed (library default).")
     args = ap.parse_args()
 
     if not os.path.isfile(args.bem_file):
@@ -826,6 +967,23 @@ def main():
 
     prefix = args.prefix or os.path.splitext(os.path.basename(args.bem_file))[0]
     os.makedirs(args.outdir, exist_ok=True)
+
+    # ---------------- .vsp3: parse EARLY, just for feather-axis params ------
+    # (the full airfoil-contour/XFOIL pass still happens later; we only need
+    # FeatherAxisXoC/FeatherOffsetXoC/Feather right now, before building the
+    # .bem-derived distributions, since sweepdist/heightdist depend on them)
+    print("=" * 60)
+    print(f"Parsing {args.vsp3_file} (feather-axis params) ...")
+    vsp3_parsed = parse_vsp3(args.vsp3_file)
+    print(f"  Rtip = {vsp3_parsed['R_tip']:.4f} m   NumBlade = {vsp3_parsed['B']}")
+    print(f"  FeatherAxisXoC = {vsp3_parsed['feather_axis_xoc']:.4f}   "
+          f"FeatherOffsetXoC = {vsp3_parsed['feather_offset_xoc']:.4f}   "
+          f"Feather = {vsp3_parsed['feather_deg']:.2f} deg")
+    if abs(vsp3_parsed['feather_deg']) > 1e-6:
+        print("  [WARNING] Non-zero overall Feather angle detected. This patch "
+              "only corrects the FeatherAxisXoC chord-fraction offset -- an "
+              "additional collective Feather rotation is NOT folded in here. "
+              "You may need to add it into `pitch` or `twistdist` manually.")
 
     # ---------------- .bem: distributions ----------------
     print("=" * 60)
@@ -853,6 +1011,33 @@ def main():
 
     extended_rows = add_hub_at_zero(table_rows, r_col=r_col)
 
+    # --- FEATHER-AXIS FIX: convert feather-axis-referenced Rake/Skew into
+    # leading-edge-referenced sweep/height, which is what FLOWUnsteady's
+    # generate_rotor actually expects for sweepdist/heightdist. Without this,
+    # sweepdist/heightdist are silently wrong whenever FeatherAxisXoC != 0. ---
+    extended_rows = apply_feather_axis_correction(
+        extended_rows, r_col, chord_col, twist_col, rake_col, skew_col,
+        feather_axis_fraction=vsp3_parsed["feather_axis_xoc"],
+        feather_offset_fraction=vsp3_parsed["feather_offset_xoc"],
+    )
+
+    if args.trim_tip_chord_below is not None:
+        # Floor (not drop) near-zero tip rows: keeps the table spanning the
+        # full r/R=[0,1] domain (no extrapolation needed beyond the table),
+        # while avoiding a literal zero-chord panel, which is geometrically
+        # degenerate (no well-defined camber/twist axis) and can cause
+        # numerical behavior that WORSENS as more elements cluster near it.
+        threshold = args.trim_tip_chord_below
+        n_floored = 0
+        for row in extended_rows:
+            if row[chord_col] < threshold:
+                row[chord_col] = threshold
+                n_floored += 1
+        if n_floored:
+            print(f"  [INFO] Floored {n_floored} row(s) with Chord/R below "
+                  f"{threshold} up to {threshold} (avoiding a literal "
+                  f"zero-chord tip point).")
+
     full_path = os.path.join(args.outdir, f"{prefix}_bladetable.csv")
     write_csv(full_path, table_header, extended_rows)
     print(f"Wrote {full_path}  ({len(extended_rows)} rows)")
@@ -871,10 +1056,9 @@ def main():
         print(f"Wrote {dist_path}  ({len(dist_rows)} rows)")
 
     # ---------------- .vsp3: airfoil contours + real XFOIL polars ----------------
+    # (vsp3_parsed was already parsed above for its feather-axis params;
+    # reused here for the airfoil-station / XFOIL pass)
     print("=" * 60)
-    print(f"Parsing {args.vsp3_file} ...")
-    vsp3_parsed = parse_vsp3(args.vsp3_file)
-    print(f"  Rtip = {vsp3_parsed['R_tip']:.4f} m   NumBlade = {vsp3_parsed['B']}")
     print(f"Found {len(vsp3_parsed['stations'])} Four-Series stations\n")
 
     # ---------------- pre-flight checks (before any XFOIL time is spent) ------
@@ -888,6 +1072,8 @@ def main():
     julia_code = build_julia_script(
         bem_header, extended_rows, r_col, chord_col, twist_col, rake_col, skew_col,
         airfoil_entries, prefix,
+        n_elements=args.n_elements, blade_r=args.blade_r,
+        spline_s=args.spline_s, spline_k=args.spline_k,
     )
     jl_path = os.path.join(args.outdir, f"{prefix}.jl")
     with open(jl_path, "w") as f:
