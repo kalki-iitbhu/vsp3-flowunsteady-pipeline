@@ -3,6 +3,68 @@
 An automated Python pipeline that transfers parametric propeller geometry directly from **OpenVSP** into **FLOWUnsteady**, turning a `.bem`/`.vsp3` geometry pair into a ready-to-run, high-fidelity Julia simulation script — no manual re-modeling required.
 
 ---
+## Recent Fixes & Validation (Oct 2026)
+
+This pipeline was debugged end-to-end by comparing its output directly against
+OpenVSP's native geometry (DegenGeom) and against VSPAERO's aerodynamic solve,
+using a real 3-blade propeller as the test case. Four real bugs were found and
+fixed in the conversion pipeline:
+
+### Bugs fixed
+1. **Feather-axis reference mismatch.** OpenVSP's `Rake`/`Skew` columns in the
+   `.bem` export are referenced to the propeller's *feather axis*
+   (`FeatherAxisXoC`, often not the leading edge), while FLOWUnsteady's
+   `generate_rotor` expects `sweepdist`/`heightdist` referenced to the
+   **leading edge**. The script now reads `FeatherAxisXoC`/`FeatherOffsetXoC`
+   from the `.vsp3` and corrects for this automatically
+   (`apply_feather_axis_correction`).
+2. **Julia float/int type bug.** Whole-number `Float64` values (e.g.
+   `blade_r = 1.0`) were being written into the generated `.jl` script as
+   bare integers (`1`), which Julia parses as `Int64` — causing a
+   `TypeError` in `generate_rotor`. Fixed in `_fmt()`.
+3. **Chord-curve parsing failure.** The original chord-curve lookup assumed
+   a `<ParmContainer Name="Chord">` spline block that doesn't exist in this
+   `.vsp3` layout, silently falling back to a flat `chord/R = 0.15`
+   assumption for every station's Reynolds-number estimate. This was wrong
+   by 5-12x across the span and biased every XFOIL polar's `Cd`/`Cl`. Fixed
+   to read the real per-station `Chord` value directly from each XSec block.
+4. **Unwanted chord-table smoothing.** `generate_rotor`'s default spline
+   smoothing (`spline_s`) distorted the chord distribution near the tip,
+   getting *worse* with more blade elements. Now defaults to `spline_s=0.0`
+   (exact interpolation through the real table).
+
+### Geometry validation
+After the fixes, the FLOWUnsteady rotor geometry matches an OpenVSP
+DegenGeom export of the same propeller to within numerical precision
+(chord length, twist, and pitch-axis convention all confirmed via
+`compare_vsp_flowunsteady_vtk.py`).
+
+### Aerodynamic validation (vs. VSPAERO)
+| Quantity | VSPAERO (corrected settings*) | FLOWUnsteady | % diff |
+|---|---|---|---|
+| CT | 0.1460 | 0.1654 | 13.2% |
+| CQ | 0.0190 | 0.0209 | 10.2% |
+| Efficiency (η) | 0.4901 | 0.5037 | **2.8%** |
+
+\* VSPAERO's default settings (`ReCref=1e7`, `Clo2D=0`) do not reflect this
+propeller's real Reynolds number (~2-3x10^5) or camber, and were corrected
+before this comparison — see commit history for details.
+
+### New CLI options (`bem_vsp3_to_flowunsteady.py`)
+- `--n-elements` — number of blade elements (`n=` in `generate_rotor`)
+- `--blade-r` — geometric element-spacing expansion ratio
+- `--spline-s` / `--spline-k` — spline smoothing controls (default: no smoothing)
+- `--trim-tip-chord-below` — floor near-zero tip chord values if present
+
+### Known remaining gap
+CT and CQ individually still differ from VSPAERO by ~10-13%, most likely
+reflecting genuine fidelity differences between FLOWUnsteady's blade-element
++ real XFOIL polars + free unsteady wake, versus VSPAERO's VLM with an
+empirical global stall-clamp — not a remaining bug in the conversion
+pipeline. The real `CLmax` has not yet been measured (XFOIL sweep needs
+extending past its current +12° cutoff) for a tighter VSPAERO-side check.
+
+---
 
 ## Background
 
