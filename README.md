@@ -151,6 +151,10 @@ A 3-bladed, D = 0.3 m propeller was evaluated at **J = 0.4** (9,200 RPM, V∞ = 
 
 ![Rotor Monitor](assets/rotor_monitor.png)
 
+### 3D Results
+[![Click to view 3D Model](assets/propellor02-propeller_initplot1.png)](assets/Paraview_Comparison.gltf)
+
+*Click the image above to open the interactive 3D viewer.*
 ---
 
 ## License
