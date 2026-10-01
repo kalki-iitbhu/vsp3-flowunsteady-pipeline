@@ -91,7 +91,7 @@ This pipeline bridges the two: design and iterate quickly in OpenVSP, then valid
    - Abrupt spanwise geometric jumps between adjacent stations
 5. **Assembly** — all airfoil contours, polars, and blade geometry are assembled into a single, ready-to-run `.jl` script for FLOWUnsteady.
 
-![FLOWUnsteady Discretization](assets/flowunsteady-discr.png)
+![FLOWUnsteady Discretization](assets/propellor02-propeller_initplot1.png)
 
 ---
 
@@ -131,7 +131,7 @@ This command runs the full pipeline on the sample `propellor02` geometry and pro
 - `_polar.csv` files containing the XFOIL-generated aerodynamic polars
 - A final assembled `.jl` script, ready to run directly in FLOWUnsteady
 
-![Airfoil Polars](assets/polars.png)
+![Airfoil Polars](assets/propellor02-propeller_initplot3.png)
 
 ---
 
@@ -145,17 +145,15 @@ A 3-bladed, D = 0.3 m propeller was evaluated at **J = 0.4** (9,200 RPM, V∞ = 
 | Torque coefficient (Cq) | 0.0213 | 0.0203 | ~4.9% |
 | Efficiency (η) | 58.56% | 58.50% | <0.1% |
 
-![Preliminary Curves](assets/prelim_curves_rfl.png)
+![Preliminary Curves](assets/propellor02-propeller_initplot4.png)
+[](assets/prelim_curves_rfl.png)
+
 
 **Interpretation:** The near-perfect agreement in efficiency (<0.1% difference) validates that the geometry translation between OpenVSP and FLOWUnsteady is accurate — the blade shape, twist, and airfoil sections are being carried over correctly. The ~5% difference in thrust and torque coefficients is expected and physically meaningful: FLOWUnsteady's vortex particle method captures wake contraction, which lowers the effective angle of attack seen by the blade relative to VSPAERO's simpler wake model. This is a signature of higher-fidelity aerodynamics, not an error in the pipeline.
 
-![Rotor Monitor](assets/rotor_monitor.png)
+![Rotor Monitor](assets/propellor02-propeller_convergence.png)
 
-### 3D Results
-[![Click to view 3D Model](assets/propellor02-propeller_initplot1.png)](assets/Paraview_Comparison.gltf)
 
-*Click the image above to open the interactive 3D viewer.*
----
 
 ## License
 
