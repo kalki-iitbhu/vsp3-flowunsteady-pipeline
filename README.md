@@ -153,8 +153,9 @@ It automatically:
 
 The aligned OpenVSP mesh and FLOWUnsteady's own mesh were loaded together in ParaView to visually confirm the fit — this comparison is saved as an interactive 3D scene:
 
-[🔍 Open interactive 3D view](https://kalki-iitbhu.github.io/vsp3-flowunsteady-pipeline/examples/propellor02/paraview/viewer.html) — rotate/inspect both meshes overlaid directly in your browser (no software needed).
+[🔍 Open interactive 3D view (hosted viewer)](https://kalki-iitbhu.github.io/vsp3-flowunsteady-pipeline/examples/propellor02/paraview/viewer.html) — rotate/inspect both meshes overlaid directly in your browser (no software needed).
 
+Alternatively: [🔍 Open in ParaView Glance](https://kitware.github.io/paraview-glance/app/?name=Paraview_01.vtkjs&url=https://kalki-iitbhu.github.io/vsp3-flowunsteady-pipeline/examples/propellor02/paraview/Paraview_01.vtkjs)
 The raw scene file is also available directly: [`examples/propellor02/paraview/Paraview_Comparison.gltf`](examples/propellor02/paraview/Paraview_Comparison.gltf) (open with any glTF-compatible viewer, e.g. ParaView itself, Blender, or a desktop model viewer).
 
 ### Bugs found and fixed
