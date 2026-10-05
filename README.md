@@ -150,11 +150,11 @@ It automatically:
 - writes an aligned copy of the OpenVSP mesh, rotated into FLOWUnsteady's frame, ready to overlay.
 
 ### Step 3 — Visual confirmation in ParaView
- 
+
 The aligned OpenVSP mesh and FLOWUnsteady's own mesh were loaded together in ParaView to visually confirm the fit — this comparison is saved as an interactive 3D scene:
- 
+
 [🔍 Open interactive 3D view](https://kalki-iitbhu.github.io/vsp3-flowunsteady-pipeline/examples/propellor02/paraview/viewer.html) — rotate/inspect both meshes overlaid directly in your browser (no software needed).
- 
+
 The raw scene file is also available directly: [`examples/propellor02/paraview/Paraview_Comparison.gltf`](examples/propellor02/paraview/Paraview_Comparison.gltf) (open with any glTF-compatible viewer, e.g. ParaView itself, Blender, or a desktop model viewer).
 
 ### Bugs found and fixed
@@ -164,7 +164,7 @@ Four real bugs were found this way and fixed in the conversion pipeline:
 1. **Feather-axis reference mismatch.** OpenVSP's `Rake`/`Skew` columns in the `.bem` export are referenced to the propeller's *feather axis* (`FeatherAxisXoC`, often not the leading edge — confirmed at `0.5`, i.e. mid-chord, for this test propeller), while FLOWUnsteady's `generate_rotor` expects `sweepdist`/`heightdist` referenced to the **leading edge**. The script now reads `FeatherAxisXoC`/`FeatherOffsetXoC` from the `.vsp3` and corrects for this automatically (`apply_feather_axis_correction`).
 2. **Julia float/int type bug.** Whole-number `Float64` values (e.g. `blade_r = 1.0`) were being written into the generated `.jl` script as bare integers (`1`), which Julia parses as `Int64` — causing a `TypeError` in `generate_rotor`. Fixed in `_fmt()`.
 3. **Chord-curve parsing failure.** The original chord-curve lookup assumed a `<ParmContainer Name="Chord">` spline block that doesn't exist in this `.vsp3` layout, silently falling back to a flat `chord/R = 0.15` assumption for every station's Reynolds-number estimate. This was wrong by 5-12x across the span and biased every XFOIL polar's `Cd`/`Cl`. Fixed to read the real per-station `Chord` value directly from each XSec block.
-4. **Unwanted chord-table smoothing.** `generate_rotor`'s default spline smoothing (`spline_s`) distorted the chord distribution near the tip, getting *worse* with more blade elements rather than better. Now defaults to `spline_s=0.0` (exact interpolation through the real table).
+4. **Unwanted chord-table smoothing.** `generate_rotor`'s default spline smoothing (`spline_s`) fits a curve through the chord/twist/sweep/height tables along the *entire* span — not just the tip. For this propeller, the effect only became visible near the tip (where the real taper is steep) because the mid-span values are gently varying and had nothing sharp for the smoothing to distort; a blade with a sharper feature elsewhere along its span would show this same bug there instead. Distortion got *worse* with more blade elements rather than better. Now defaults to `spline_s=0.0` (exact interpolation through the real table).
 
 After these fixes, FLOWUnsteady's rotor geometry matches the OpenVSP DegenGeom mesh to within numerical precision — chord length, twist, and (once the pitch-axis convention difference above is accounted for) absolute position all agree.
 
